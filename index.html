@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Chatbot (MVP)</title>
+<style>
+:root{font-family:Inter, Roboto, Arial, sans-serif}
+body{background:#fafafa;color:#222;margin:0;padding:18px;display:flex;justify-content:center}
+.wrap{width:100%;max-width:820px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+h1{font-size:18px;margin:0}
+#chat{background:#fff;border:1px solid #e6e6e6;border-radius:10px;padding:12px;height:480px;overflow:auto;box-shadow:0 6px 18px rgba(0,0,0,0.03)}
+.msg{max-width:82%;padding:10px;border-radius:10px;margin:8px 0;white-space:pre-wrap}
+.user{margin-left:auto;background:#dff1ff;text-align:right}
+.assistant{margin-right:auto;background:#f2f2f5;text-align:left}
+.system{display:none}
+#controls{display:flex;gap:8px;margin-top:10px}
+#msgInput{flex:1;padding:10px;border-radius:8px;border:1px solid #ddd;font-size:14px}
+button{padding:10px 14px;border-radius:8px;border:0;background:#2563eb;color:#fff;cursor:pointer}
+button:disabled{opacity:0.6;cursor:default}
+.meta{font-size:13px;color:#666;margin-top:8px}
+.small{font-size:12px;color:#888}
+footer{margin-top:12px;font-size:13px;color:#666}
+.debug{margin-top:10px;background:#111;color:#fff;padding:8px;border-radius:6px;font-family:monospace;font-size:12px;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>Chatt (MVP) — konversation glöms vid reload</h1>
+</header>
+
+<div id="chat" aria-live="polite" ></div>
+
+<div id="controls">
+<input id="msgInput" placeholder="Skriv här..." autocomplete="off" />
+<button id="sendBtn">Skicka</button>
+</div>
+
+<div class="meta">
+<div class="small">Skriver till Make webhook: <span id="webhookShow"></span></div>
+<div class="small">Tips: uppdatera sidan för att rensa konversationen.</div>
+</div>
+
+<div class="debug" id="debugBox"></div>
+
+<footer>
+<div class="small">Instruktion: byt ut <code>const WEBHOOK_URL</code> i koden nedan mot din Make-webhook-URL.</div>
+</footer>
+</div>
+
+<script>
+/* ---------- KONFIGURERA HÄR: byt ut din webhook URL ---------- */
+const WEBHOOK_URL = "WEBHOOK_URL_HAR"; // <-- ersätt med din Make webhook-URL
+/* ------------------------------------------------------------ */
+
+// Hur många meddelanden vi skickar max (sliding window)
+const MAX_HISTORY_ITEMS = 24;
+
+// Håll historiken i minnet (vanlig variabel) så att den RENSAS vid reload
+let history = [
+{ role: 'system', content: 'Du är en hjälpsam assistent för webbplatsen.' }
+];
+
+// DOM
+const chatEl = document.getElementById('chat');
+const inputEl = document.getElementById('msgInput');
+const sendBtn = document.getElementById('sendBtn');
+const webhookShow = document.getElementById('webhookShow');
+const debugBox = document.getElementById('debugBox');
+
+webhookShow.innerText = WEBHOOK_URL;
+
+// UI: rendera hela chatten
+function renderChat(){
+chatEl.innerHTML = '';
+for(const m of history){
+if(m.role === 'system') continue; // döljer system-meddelande i UI
+const d = document.createElement('div');
+d.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+d.textContent = (m.role === 'user' ? 'Du: ' : 'AI: ') + m.content;
+chatEl.appendChild(d);
+}
+chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+// Trimma historiken (senaste N)
+function trimHistory(arr, max) {
+if(arr.length <= max) return arr;
+return arr.slice(arr.length - max);
+}
+
+// Bygg en säkert escaped prompt-sträng från history
+function buildPromptFromHistory(hist) {
+// Tagga rader med roller så modellen förstår vem som sagt vad
+const parts = hist.map(item => {
+const tag = item.role === 'system' ? '[SYSTEM]' : item.role === 'user' ? '[USER]' : '[ASSISTANT]';
+// Vi normaliserar whitespace; innehållet lämnas som det är (JSON.stringify hanterar escaping)
+return `${tag}\n${item.content}`;
+});
+// Lämna en tom [USER] tagg i slutet för att markera att nästa är användarens nya input (valfritt)
+return parts.join("\n\n") + "\n\n";
+}
+
+// Skicka payload till Make webhook
+async function postToMake(payload) {
+try {
+const res = await fetch(WEBHOOK_URL, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify(payload), // << viktigt: stringify så inga "bad control characters"
+mode: 'cors'
+});
+const text = await res.text();
+// För debug: visa rå responstext (Make kan returnera json eller text)
+debug('HTTP status: ' + res.status);
+debug('Raw response: ' + text);
+if(!res.ok) throw new Error('HTTP ' + res.status + ' — ' + text);
+// försök parsea som JSON
+try {
+return JSON.parse(text);
+} catch(e) {
+// om inte JSON, returnera text som reply-fält
+return { reply: text };
+}
+} catch(err) {
+debug('Network error: ' + err.message);
+throw err;
+}
+}
+
+// debug-utskrift i rutan
+function debug(msg){
+debugBox.style.display = 'block';
+const time = new Date().toLocaleTimeString();
+debugBox.textContent = `[${time}] ${msg}\n` + debugBox.textContent;
+}
+
+// huvudfunktion som körs vid skicka
+async function sendMessageFromUser(text) {
+if(!WEBHOOK_URL || WEBHOOK_URL.includes('WEBHOOK_URL_HAR')) {
+alert('Byt ut WEBHOOK_URL i koden mot din Make webhook-URL först.');
+return;
+}
+
+// push user message
+history.push({ role: 'user', content: text });
+renderChat();
+
+// trimma
+history = trimHistory(history, MAX_HISTORY_ITEMS);
+
+// bygg prompt (hela historiken som en enda sträng)
+const promptStr = buildPromptFromHistory(history) + '[USER]\n' + text + '\n';
+
+// payload vi skickar till Make
+const payload = {
+sessionId: Date.now().toString(),
+pageUrl: window.location.href,
+history: history, // användbart för debugging i Make
+prompt: promptStr // det här använder du i DeepSeek (mappa content = webhook.body.prompt)
+};
+
+debug('Payload skickas till Make (kort): ' + JSON.stringify({ sessionId: payload.sessionId, promptPreview: promptStr.slice(0,200) }) );
+
+try {
+sendBtn.disabled = true;
+const result = await postToMake(payload);
+
+// Förväntar vanligtvis { reply: "text..." } från Make (Respond to webhook)
+const replyText = result?.reply ?? result?.output ?? (typeof result === 'string' ? result : JSON.stringify(result));
+history.push({ role: 'assistant', content: replyText });
+renderChat();
+} catch(err) {
+history.push({ role: 'assistant', content: 'Fel: kunde inte kontakta AI — se debugkonsol.' });
+renderChat();
+} finally {
+sendBtn.disabled = false;
+}
+}
+
+// UI events
+sendBtn.addEventListener('click', async () => {
+const txt = inputEl.value.trim();
+if(!txt) return;
+inputEl.value = '';
+await sendMessageFromUser(txt);
+});
+
+// allow Enter to send
+inputEl.addEventListener('keydown', (e) => {
+if(e.key === 'Enter' && !e.shiftKey) {
+e.preventDefault();
+sendBtn.click();
+}
+});
+
+// initial render
+renderChat();
+</script>
+</body>
+</html>
